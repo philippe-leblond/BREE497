@@ -22,14 +22,14 @@
 #define EN_RR   15
 
 // === ENCODER PINS ===
-#define ENC_FL_A 18
-#define ENC_FL_B 19
-#define ENC_FR_A 22
-#define ENC_FR_B 21
-#define ENC_RL_A 34
-#define ENC_RL_B 35
-#define ENC_RR_A 17
-#define ENC_RR_B 16
+#define ENC_FL_A 19 //green 
+#define ENC_FL_B 18 //yellow
+#define ENC_FR_A 22 //green
+#define ENC_FR_B 21 //yellow
+#define ENC_RL_A 35 //yellow
+#define ENC_RL_B 34 //green
+#define ENC_RR_A 16 //green
+#define ENC_RR_B 17 //yellow
 
 // === PWM CONFIG ===
 const int freq = 1000;
@@ -50,7 +50,7 @@ int speedValue = 255; // 0–255
 
 // === TIMER VARIABLES ===
 unsigned long lastEncoderSend = 0;
-const unsigned long encoderInterval = 100; // ms
+const unsigned long encoderInterval = 30; // ms
 
 // === ENCODER INTERRUPTS ===
 void IRAM_ATTR readEncoderFL() {
@@ -121,6 +121,22 @@ void moveRight() {
   Serial.println("Right");
 }
 
+void turnLeft() {
+  setMotor(IN1_FL, IN2_FL, EN_FL, false);
+  setMotor(IN1_FR, IN2_FR, EN_FR, true);
+  setMotor(IN1_RL, IN2_RL, EN_RL, false);
+  setMotor(IN1_RR, IN2_RR, EN_RR, true);
+  Serial.println("Turning Left");
+}
+
+void turnRight() {
+  setMotor(IN1_FL, IN2_FL, EN_FL, true);
+  setMotor(IN1_FR, IN2_FR, EN_FR, false);
+  setMotor(IN1_RL, IN2_RL, EN_RL, true);
+  setMotor(IN1_RR, IN2_RR, EN_RR, false);
+  Serial.println("Turning Right");
+}
+
 // === SETUP ===
 void setup() {
   Serial.begin(115200);
@@ -173,11 +189,14 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
-    if (cmd == "forward") moveForward();
-    else if (cmd == "backward") moveBackward();
-    else if (cmd == "left") moveLeft();
-    else if (cmd == "right") moveRight();
-    else if (cmd == "stop") stopAll();
+    if (cmd == "<FORWARD>") moveForward();
+    else if (cmd == "<BACKWARD>") moveBackward();
+    else if (cmd == "<LEFT>") moveLeft();
+    else if (cmd == "<RIGHT>") moveRight();
+    else if (cmd == "<TURN_LEFT>") turnLeft();
+    else if (cmd == "<TURN_RIGHT>") turnRight();
+    else if (cmd == "<STOP>") stopAll();
+
   }
 
   // Send encoder data every 100 ms without delay()
