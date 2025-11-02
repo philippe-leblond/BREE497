@@ -149,6 +149,7 @@ void loop() {
     float gyroZ = getMedian(gyroZArr, NUM_READINGS);
 
     // --- Print results ---
+    Serial.print("<");
     Serial.print("U1:"); Serial.print(ultrasonicMedians[0]);
     Serial.print(",U2:"); Serial.print(ultrasonicMedians[1]);
     Serial.print(",L1:"); Serial.print(lineMedians[0]);
@@ -159,6 +160,7 @@ void loop() {
     Serial.print(",GZ:"); Serial.print(gyroZ);
     Serial.print(",AX:"); Serial.print(accelX);
     Serial.print(",AY:"); Serial.print(accelY);
-    Serial.print(",AZ:"); Serial.println(accelZ);
+    Serial.print(",AZ:"); Serial.print(accelZ);
+    Serial.println(">");
   }
 }
