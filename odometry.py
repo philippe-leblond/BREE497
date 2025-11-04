@@ -24,12 +24,14 @@ class OdometryNode(Node):
 
         # Internal state
         self.last_time = self.get_clock().now()
+        self.last_imu_time = self.get_clock().now()
         self.last_left_ticks = 0
         self.last_right_ticks = 0
         self.x = 0.0
         self.y = 0.0
         self.theta = 0.0
         self.imu_yaw = 0.0
+        self.use_imu = True
 
         # Constants
         self.TICKS_PER_REV = 1000
@@ -66,13 +68,17 @@ class OdometryNode(Node):
             d_right = 2 * math.pi * self.WHEEL_RADIUS * (delta_right / self.TICKS_PER_REV)
             d_center = (d_left + d_right) / 2.0
 
-            # Update position
+            # Update theta
             self.theta += (d_right - d_left) / self.WHEEL_BASE
-            self.x += d_center * math.cos(self.theta)
-            self.y += d_center * math.sin(self.theta)
 
-            # Use IMU yaw if available
-            yaw = self.imu_yaw if self.imu_yaw != 0 else self.theta
+            # integrate gyro.z (rad/s)
+            yaw = self.imu_yaw if self.use_imu else self.theta
+
+            # Update x, y postition
+            self.x += d_center * math.cos(yaw)
+            self.y += d_center * math.sin(yaw)
+            
+            # Convert yaw to quaternion for publishing
             q = quaternion_from_euler(0, 0, yaw)
 
             # Debug messages
@@ -99,12 +105,22 @@ class OdometryNode(Node):
 
     def imu_callback(self, msg: Imu):
         try:
-            # Convert IMU yaw (Z rotation) from quaternion
-            q = msg.orientation
-            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-            self.imu_yaw = math.atan2(siny_cosp, cosy_cosp)
-            self.get_logger().debug(f"Received IMU yaw: {math.degrees(self.imu_yaw):.2f}°")
+            # Time step for gyro integration
+            current_time = self.get_clock().now()
+            dt = (current_time - self.last_imu_time).nanoseconds / 1e9
+            self.last_imu_time = current_time
+            if dt <= 0:
+                return
+
+            # Integrate yaw from angular velocity around Z
+            self.imu_yaw += msg.angular_velocity.z * dt
+            # Normalize between -pi and pi
+            self.imu_yaw = math.atan2(math.sin(self.imu_yaw), math.cos(self.imu_yaw))
+
+            self.get_logger().debug(
+                f"Integrated IMU yaw: {math.degrees(self.imu_yaw):.2f}°  (Δt={dt:.3f}s)"
+            )
+
         except Exception as e:
             self.get_logger().error(f"Error in imu_callback: {e}")
 

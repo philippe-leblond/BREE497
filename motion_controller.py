@@ -29,8 +29,8 @@ class MotionControllerNode(Node):
         self.new_goal_received = False
 
         # === Control parameters ===
-        self.kp_linear = 1.0    # proportional gain for linear velocity
-        self.kp_angular = 2.0   # proportional gain for angular velocity
+        self.kp_linear = 0.5    # proportional gain for linear velocity
+        self.kp_angular = 1.5   # proportional gain for angular velocity
         self.xy_tolerance = 0.05  # meters
         self.yaw_tolerance = math.radians(5)  # radians
 
@@ -95,8 +95,8 @@ class MotionControllerNode(Node):
             return
 
         # Proportional control
-        vx = self.kp_linear * distance
-        vy = 0.0  # mecanum will handle lateral movement if desired
+        vx = self.kp_linear * distance * math.cos(angle_error) 
+        vy = self.kp_linear * distance * math.sin(angle_error)
         wz = self.kp_angular * angle_error
 
         # Limit max velocities

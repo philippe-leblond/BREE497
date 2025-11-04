@@ -22,17 +22,16 @@ class MotorDriverNode(Node):
             raise
 
         # --- Subscribe to /safe_cmd_vel ---
-        self.subscription = self.create_subscription(
-            Twist,
-            '/safe_cmd_vel',
-            self.cmd_vel_callback,
-            10
-        )
+        self.subscription = self.create_subscription(Twist, '/safe_cmd_vel', self.cmd_vel_callback, 10)
 
         # --- Failsafe variables ---
         self.last_command_time = self.get_clock().now()
         self.command_timeout = Duration(seconds=2.0)  # Stop if no command for 2 seconds
         self.last_command = None
+
+        # --- Configurable max speeds (tune to your controllers / robot) ---
+        self.max_linear_speed = 0.5   # m/s (or 1.0 if your controller uses normalized range)
+        self.max_angular_speed = 1.0  # rad/s
 
         # --- Timer to check for command timeout ---
         self.create_timer(0.5, self.watchdog_check)
@@ -45,20 +44,32 @@ class MotorDriverNode(Node):
         linear_y = msg.linear.y
         angular_z = msg.angular.z
 
-        #command = "<STOP>"
-        command = "<FORWARD>"
+        command = "<STOP:0>"
 
+        # Normalize velocities into 0..1 range before scaling to 0..255
+        lin_mag = max(abs(linear_x), abs(linear_y))
+        lin_norm = min(1.0, lin_mag / max(self.max_linear_speed, 1e-6))
+        ang_norm = min(1.0, abs(angular_z) / max(self.max_angular_speed, 1e-6))
 
-        if linear_x > 0.1:
-            command = "<FORWARD>"
-        elif linear_x < -0.1:
-            command = "<BACKWARD>"
-        elif linear_y > 0.1:
-            command = "<RIGHT>"
-        elif linear_y < -0.1:
-            command = "<LEFT>"
-        elif abs(angular_z) > 0.1:
-            command = "<TURN_LEFT>" if angular_z > 0 else "<TURN_RIGHT>"
+        linear_speed = int(lin_norm * 255)
+        angular_speed = int(ang_norm * 255)
+
+        # Priority: rotation -> forward/backward -> lateral
+        if abs(angular_z) > 0.1:
+            if angular_z > 0:
+                command = f"<TURN_LEFT:{angular_speed}>"
+            else:
+                command = f"<TURN_RIGHT:{angular_speed}>"
+        elif abs(linear_x) > 0.1:
+            if linear_x > 0:
+                command = f"<FORWARD:{linear_speed}>"
+            else:
+                command = f"<BACKWARD:{linear_speed}>"
+        elif abs(linear_y) > 0.1:
+            if linear_y > 0:
+                command = f"<RIGHT:{linear_speed}>"
+            else:
+                command = f"<LEFT:{linear_speed}>"
 
         # Only send new commands when they change
         if command != self.last_command:
@@ -75,10 +86,10 @@ class MotorDriverNode(Node):
         """Stop the robot if no command has been received recently."""
         time_since_last = self.get_clock().now() - self.last_command_time
         if time_since_last > self.command_timeout:
-            if self.last_command != "<STOP>":
+            if self.last_command != "<STOP:0>":
                 self.get_logger().warn("⏱️ No cmd_vel received for 2s — sending STOP")
-                self.send_command("<STOP>")
-                self.last_command = "<STOP>"
+                self.send_command("<STOP:0>")
+                self.last_command = "<STOP:0>"
 
     # ======================================================
     # SERIAL SEND FUNCTION
