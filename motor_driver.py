@@ -9,35 +9,39 @@ from rclpy.duration import Duration
 class MotorDriverNode(Node):
     def __init__(self):
         super().__init__('motor_driver_node')
-        self.get_logger().info("⚙️ Motor Driver Node with failsafe started")
+        self.get_logger().info("⚙️ Motor Driver Node started (STOP only on arrival)")
 
         # --- Serial connection ---
-        self.port = '/dev/ttyUSB0'  # Update this to your ESP32 port
+        self.port = '/dev/ttyUSB0'
         self.baudrate = 115200
+
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
             self.get_logger().info(f"✅ Connected to ESP32 on {self.port}")
         except Exception as e:
-            self.get_logger().error(f"❌ Failed to connect to {self.port}: {e}")
+            self.get_logger().error(f"❌ Failed to connect to ESP32: {e}")
             raise
 
-        # --- Subscribe to /safe_cmd_vel ---
-        self.subscription = self.create_subscription(Twist, '/safe_cmd_vel', self.cmd_vel_callback, 10)
+        # --- Subscribe to /cmd_vel ---
+        self.subscription = self.create_subscription(
+            Twist, '/cmd_vel', self.cmd_vel_callback, 10
+        )
+        self.get_logger().info("📡 Subscribed to /cmd_vel")
 
-        # --- Failsafe variables ---
-        self.last_command_time = self.get_clock().now()
-        self.command_timeout = Duration(seconds=2.0)  # Stop if no command for 2 seconds
+        # STOP spam prevention
         self.last_command = None
 
-        # --- Configurable max speeds (tune to your controllers / robot) ---
-        self.max_linear_speed = 0.5   # m/s (or 1.0 if your controller uses normalized range)
-        self.max_angular_speed = 1.0  # rad/s
+        # Speed limits (m/s)
+        self.max_linear_speed = 0.10
+        self.max_angular_speed = 0.05
 
-        # --- Timer to check for command timeout ---
+        # Watchdog (log-only)
+        self.last_command_time = self.get_clock().now()
+        self.command_timeout = Duration(seconds=2.0)
         self.create_timer(0.5, self.watchdog_check)
 
     # ======================================================
-    # CALLBACK: Convert Twist → discrete motion command
+    # CALLBACK: /cmd_vel
     # ======================================================
     def cmd_vel_callback(self, msg: Twist):
         linear_x = msg.linear.x
@@ -46,7 +50,7 @@ class MotorDriverNode(Node):
 
         command = "<STOP:0>"
 
-        # Normalize velocities into 0..1 range before scaling to 0..255
+        # Normalize
         lin_mag = max(abs(linear_x), abs(linear_y))
         lin_norm = min(1.0, lin_mag / max(self.max_linear_speed, 1e-6))
         ang_norm = min(1.0, abs(angular_z) / max(self.max_angular_speed, 1e-6))
@@ -54,74 +58,94 @@ class MotorDriverNode(Node):
         linear_speed = int(lin_norm * 255)
         angular_speed = int(ang_norm * 255)
 
-        # Priority: rotation -> forward/backward -> lateral
-        if abs(angular_z) > 0.1:
-            if angular_z > 0:
-                command = f"<TURN_LEFT:{angular_speed}>"
-            else:
-                command = f"<TURN_RIGHT:{angular_speed}>"
-        elif abs(linear_x) > 0.1:
-            if linear_x > 0:
-                command = f"<FORWARD:{linear_speed}>"
-            else:
-                command = f"<BACKWARD:{linear_speed}>"
-        elif abs(linear_y) > 0.1:
-            if linear_y > 0:
-                command = f"<RIGHT:{linear_speed}>"
-            else:
-                command = f"<LEFT:{linear_speed}>"
+        # --- DEADZONE COMPENSATION ---
+        MIN_PWM = 120
 
-        # Only send new commands when they change
+        if linear_speed > 0:
+            linear_speed = max(MIN_PWM, linear_speed)
+
+        if angular_speed > 0:
+            angular_speed = max(MIN_PWM, angular_speed)
+            angular_speed = min(150, angular_speed)  # safe limit
+
+        # Motion mode selection
+        if abs(angular_z) > 0.1:
+            command = f"<TURNLEFT:{angular_speed}>" if angular_z > 0 else f"<TURNRIGHT:{angular_speed}>"
+        elif abs(linear_x) > 0.01:
+            command = f"<FORWARD:{linear_speed}>" if linear_x > 0 else f"<BACKWARD:{linear_speed}>"
+        elif abs(linear_y) > 0.01:
+            command = f"<MOVERIGHT:{linear_speed}>" if linear_y > 0 else f"<MOVELEFT:{linear_speed}>"
+        else:
+            command = "<STOP:0>"
+
+        # Avoid STOP spam
+        if command == "<STOP:0>" and self.last_command == "<STOP:0>":
+            return
+
+        # Send only when changed
         if command != self.last_command:
             self.send_command(command)
             self.last_command = command
 
-        # Update last message time
+        # Track last time we got a movement command
         self.last_command_time = self.get_clock().now()
 
     # ======================================================
-    # FAILSAFE WATCHDOG
+    # Watchdog (log-only)
     # ======================================================
     def watchdog_check(self):
-        """Stop the robot if no command has been received recently."""
-        time_since_last = self.get_clock().now() - self.last_command_time
-        if time_since_last > self.command_timeout:
-            if self.last_command != "<STOP:0>":
-                self.get_logger().warn("⏱️ No cmd_vel received for 2s — sending STOP")
-                self.send_command("<STOP:0>")
-                self.last_command = "<STOP:0>"
+        now = self.get_clock().now()
+        if (now - self.last_command_time) > self.command_timeout:
+            self.get_logger().warn("⏳ No /cmd_vel received for 2s")
+        else:
+            self.get_logger().debug("✔️ Watchdog OK")
 
     # ======================================================
-    # SERIAL SEND FUNCTION
+    # SERIAL SEND
     # ======================================================
     def send_command(self, command: str):
         try:
             self.ser.write((command + "\n").encode())
-            self.get_logger().info(f"➡️ Sent command: {command}")
+            self.get_logger().info(f"➡️ Sent to ESP32: {command}")
         except Exception as e:
-            self.get_logger().warn(f"⚠️ Serial write error: {e}")
+            self.get_logger().error(f"⚠️ Serial write error: {e}")
 
     # ======================================================
     # CLEANUP
     # ======================================================
     def destroy_node(self):
-        self.get_logger().info("🛑 Closing serial port...")
-        if hasattr(self, 'ser') and self.ser.is_open:
-            self.ser.close()
+        self.get_logger().info("🛑 Sending STOP before shutdown")
+
+        try:
+            if hasattr(self, 'ser') and self.ser.is_open:
+                self.ser.write(b"<STOP:0>\n")
+                self.get_logger().info("➡️ STOP sent to ESP32")
+        except Exception as e:
+            self.get_logger().error(f"⚠️ Could not send STOP: {e}")
+
+        try:
+            if hasattr(self, 'ser') and self.ser.is_open:
+                self.ser.close()
+        except:
+            pass
+
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = MotorDriverNode()
+
     try:
         rclpy.spin(node)
+
     except KeyboardInterrupt:
-        node.get_logger().info("🧹 Stopped by user")
+        node.get_logger().info("🛑 Ctrl+C pressed — stopping robot")
+        node.send_command("<STOP:0>")
+
     finally:
         node.destroy_node()
         rclpy.shutdown()
-        print("Node shutdown complete.")
 
 
 if __name__ == '__main__':
