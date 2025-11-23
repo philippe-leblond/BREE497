@@ -4,6 +4,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
 import math
+import time
 
 class MotionControllerNode(Node):
     def __init__(self):
@@ -17,22 +18,24 @@ class MotionControllerNode(Node):
 
         # === Waypoints for autonomous run ===
         self.waypoints = [
-            (0.5, 0.0),
-            (1.0, 0.5),
-            (1.5, 0.0),
-            (1.0, -0.5),
-            (0.5, 0.0)
+            (0.2, 0.0), # in meters
+            (0.2, 0.2),
+            (0.0, 0.2),
+            (0.0, 0.0),
         ]
         self.current_goal_index = 0
         self.goal_x = None
         self.goal_y = None
         self.new_goal_received = False
 
+        # Track last waypoint printed
+        self.last_reached_index = -1
+
         # === Control parameters ===
-        self.kp_linear = 0.5    # proportional gain for linear velocity
-        self.kp_angular = 1.5   # proportional gain for angular velocity
-        self.xy_tolerance = 0.05  # meters
-        self.yaw_tolerance = math.radians(5)  # radians
+        self.kp_linear = 0.1
+        self.kp_angular = 0.3
+        self.xy_tolerance = 0.05
+        self.yaw_tolerance = math.radians(5)
 
         # === Subscribers ===
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
@@ -41,8 +44,9 @@ class MotionControllerNode(Node):
         # === Publisher ===
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        # === Timer for control loop ===
-        self.create_timer(0.05, self.control_loop)  # 20 Hz
+        # === Timers ===
+        self.create_timer(0.05, self.control_loop)  # 20 Hz control
+        self.create_timer(1.0, self.debug_loop)      # 1 Hz debug
 
     # ====================
     # CALLBACKS
@@ -50,7 +54,7 @@ class MotionControllerNode(Node):
     def odom_callback(self, msg: Odometry):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
-        # Yaw from quaternion
+
         q = msg.pose.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
@@ -60,13 +64,31 @@ class MotionControllerNode(Node):
         self.goal_x = msg.pose.position.x
         self.goal_y = msg.pose.position.y
         self.new_goal_received = True
-        self.get_logger().info(f"🎯 New goal received: ({self.goal_x:.2f}, {self.goal_y:.2f})")
+        self.get_logger().info(f"🎯 New manual goal received: ({self.goal_x:.2f}, {self.goal_y:.2f})")
+
+    # ====================
+    # DEBUG LOOP (1 Hz)
+    # ====================
+    def debug_loop(self):
+        """Print slow debug info once per second."""
+        if self.new_goal_received:
+            goal_info = f"Manual goal → ({self.goal_x:.2f}, {self.goal_y:.2f})"
+        else:
+            if self.current_goal_index < len(self.waypoints):
+                gx, gy = self.waypoints[self.current_goal_index]
+                goal_info = f"Waypoint {self.current_goal_index+1} → ({gx:.2f}, {gy:.2f})"
+            else:
+                goal_info = "No more waypoints."
+
+        self.get_logger().info(
+            f"📍 Pos=({self.x:.2f}, {self.y:.2f}) θ={math.degrees(self.theta):.1f}° | {goal_info}"
+        )
 
     # ====================
     # CONTROL LOOP
     # ====================
     def control_loop(self):
-        # Select current target
+        # Select target
         if self.new_goal_received:
             target_x = self.goal_x
             target_y = self.goal_y
@@ -83,38 +105,47 @@ class MotionControllerNode(Node):
         angle_to_goal = math.atan2(dy, dx)
         angle_error = self.angle_diff(angle_to_goal, self.theta)
 
-        # Debug
-        self.get_logger().debug(f"Current pos: ({self.x:.2f}, {self.y:.2f}), Goal: ({target_x:.2f}, {target_y:.2f}), Dist: {distance:.2f}, Angle error: {math.degrees(angle_error):.2f}")
-
         # Check if goal reached
         if distance < self.xy_tolerance:
-            if not self.new_goal_received:
-                self.current_goal_index += 1
-                self.get_logger().info(f"✅ Reached waypoint {self.current_goal_index}")
             self.publish_stop()
+
+            if not self.new_goal_received:
+                if self.current_goal_index != self.last_reached_index:
+                    self.get_logger().info(
+                        f"🎉 Reached waypoint {self.current_goal_index+1}! Moving to next one..."
+                    )
+                    self.last_reached_index = self.current_goal_index
+
+                self.current_goal_index += 1
+
             return
 
-        # Proportional control
-        vx = self.kp_linear * distance * math.cos(angle_error) 
-        vy = self.kp_linear * distance * math.sin(angle_error)
-        wz = self.kp_angular * angle_error
-
-        # Limit max velocities
-        vx = max(min(vx, 0.5), -0.5)
-        wz = max(min(wz, 1.0), -1.0)
-
-        # Publish command
+        # === Proportional controller with two phases ===
         cmd = Twist()
-        cmd.linear.x = vx
-        cmd.linear.y = vy
-        cmd.angular.z = wz
+
+        # 1) Big heading error -> rotate in place
+        angle_threshold = math.radians(10)  # ~10 degrees
+
+        if abs(angle_error) > angle_threshold:
+            cmd.angular.z = self.kp_angular * angle_error
+            cmd.linear.x = 0.0
+            cmd.linear.y = 0.0
+
+        else:
+            # 2) Heading is good enough -> drive mostly forward
+            cmd.angular.z = self.kp_angular * angle_error   # small corrections
+            cmd.linear.x = self.kp_linear * distance       # forward
+            cmd.linear.y = 0.0                             # no lateral for now
+
+        # Limit speeds
+        cmd.linear.x = max(min(cmd.linear.x, 0.2), -0.2)   # slower forward
+        cmd.angular.z = max(min(cmd.angular.z, 0.4), -0.4) # slower turning
+
         self.cmd_pub.publish(cmd)
+
 
     def publish_stop(self):
         cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.linear.y = 0.0
-        cmd.angular.z = 0.0
         self.cmd_pub.publish(cmd)
 
     # ====================
@@ -122,18 +153,18 @@ class MotionControllerNode(Node):
     # ====================
     @staticmethod
     def angle_diff(target, current):
-        """Compute minimal angle difference [-pi, pi]."""
         diff = target - current
         while diff > math.pi:
-            diff -= 2*math.pi
+            diff -= 2 * math.pi
         while diff < -math.pi:
-            diff += 2*math.pi
+            diff += 2 * math.pi
         return diff
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = MotionControllerNode()
-    node.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+    node.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -141,6 +172,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
