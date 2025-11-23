@@ -2,8 +2,8 @@
 
 // === MOTOR PINS ===
 // Front Left
-#define IN1_FL  26
-#define IN2_FL  27
+#define IN1_FL  27
+#define IN2_FL  26
 #define EN_FL   25
 
 // Front Right
@@ -12,20 +12,21 @@
 #define EN_FR   14
 
 // Rear Left
-#define IN1_RL  5
-#define IN2_RL  23
+#define IN1_RL  23
+#define IN2_RL  5
 #define EN_RL   33
 
 // Rear Right
-#define IN1_RR  4
-#define IN2_RR  2
-#define EN_RR   15
+#define IN1_RR  2
+#define IN2_RR  4
+#define EN_RR   15  
+
 
 // === ENCODER PINS ===
 #define ENC_FL_A 19 //green 
 #define ENC_FL_B 18 //yellow
-#define ENC_FR_A 22 //green
-#define ENC_FR_B 21 //yellow
+#define ENC_FR_A 21 //yellow
+#define ENC_FR_B 22 //green
 #define ENC_RL_A 35 //yellow
 #define ENC_RL_B 34 //green
 #define ENC_RR_A 16 //green
@@ -46,7 +47,8 @@ volatile long encoderRL = 0;
 volatile long encoderRR = 0;
 
 // === MOTOR SPEED ===
-int speedValue = 255; // 0–255
+String command = "";
+int speedValue = 0;
 
 // === TIMER VARIABLES ===
 unsigned long lastEncoderSend = 0;
@@ -74,14 +76,14 @@ void IRAM_ATTR readEncoderRR() {
 }
 
 // === MOTOR CONTROL ===
-void setMotor(int in1, int in2, int channel, bool forward) {
+void setMotor(int in1, int in2, int channel, bool forward, int speedValue) {
   digitalWrite(in1, forward ? HIGH : LOW);
   digitalWrite(in2, forward ? LOW : HIGH);
   ledcWrite(channel, speedValue);
 }
 
 // === MOVEMENT FUNCTIONS ===
-void stopAll() {
+void stopMotors() {
   ledcWrite(EN_FL, 0);
   ledcWrite(EN_FR, 0);
   ledcWrite(EN_RL, 0);
@@ -89,52 +91,69 @@ void stopAll() {
   Serial.println("Motors stopped");
 }
 
-void moveForward() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, true);
-  setMotor(IN1_FR, IN2_FR, EN_FR, true);
-  setMotor(IN1_RL, IN2_RL, EN_RL, true);
-  setMotor(IN1_RR, IN2_RR, EN_RR, true);
-  Serial.println("Forward");
+void moveForward(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, true, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, true, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, true, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, true, speedValue);
+  Serial.print("Forward: "); Serial.println(speedValue);
 }
 
-void moveBackward() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, false);
-  setMotor(IN1_FR, IN2_FR, EN_FR, false);
-  setMotor(IN1_RL, IN2_RL, EN_RL, false);
-  setMotor(IN1_RR, IN2_RR, EN_RR, false);
-  Serial.println("Backward");
+void moveBackward(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, false, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, false, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, false, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, false, speedValue);
+  Serial.print("Backward: "); Serial.println(speedValue);
 }
 
-void moveLeft() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, false);
-  setMotor(IN1_FR, IN2_FR, EN_FR, true);
-  setMotor(IN1_RL, IN2_RL, EN_RL, true);
-  setMotor(IN1_RR, IN2_RR, EN_RR, false);
-  Serial.println("Left");
+void moveRight(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, false, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, true, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, true, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, false, speedValue);
+  Serial.print("Left: "); Serial.println(speedValue);
 }
 
-void moveRight() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, true);
-  setMotor(IN1_FR, IN2_FR, EN_FR, false);
-  setMotor(IN1_RL, IN2_RL, EN_RL, false);
-  setMotor(IN1_RR, IN2_RR, EN_RR, true);
-  Serial.println("Right");
+void moveLeft(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, true, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, false, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, false, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, true, speedValue);
+  Serial.print("Right: "); Serial.println(speedValue);
 }
 
-void turnLeft() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, false);
-  setMotor(IN1_FR, IN2_FR, EN_FR, true);
-  setMotor(IN1_RL, IN2_RL, EN_RL, false);
-  setMotor(IN1_RR, IN2_RR, EN_RR, true);
-  Serial.println("Turning Left");
+void turnLeft(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, false, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, true, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, false, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, true, speedValue);
+  Serial.print("Turning Left: "); Serial.println(speedValue);
 }
 
-void turnRight() {
-  setMotor(IN1_FL, IN2_FL, EN_FL, true);
-  setMotor(IN1_FR, IN2_FR, EN_FR, false);
-  setMotor(IN1_RL, IN2_RL, EN_RL, true);
-  setMotor(IN1_RR, IN2_RR, EN_RR, false);
+void turnRight(int speedValue) {
+  setMotor(IN1_FL, IN2_FL, EN_FL, true, speedValue);
+  setMotor(IN1_FR, IN2_FR, EN_FR, false, speedValue);
+  setMotor(IN1_RL, IN2_RL, EN_RL, true, speedValue);
+  setMotor(IN1_RR, IN2_RR, EN_RR, false, speedValue);
   Serial.println("Turning Right");
+}
+
+void parseCommand(String input) {
+  input.trim();
+  if (input.startsWith("<") && input.endsWith(">")) {
+    input.remove(0, 1);              // remove '<'
+    input.remove(input.length() - 1); // remove '>'
+
+    int separatorIndex = input.indexOf(':');
+    if (separatorIndex != -1) {
+      command = input.substring(0, separatorIndex);
+      speedValue = input.substring(separatorIndex + 1).toInt();
+    } else {
+      command = input;
+      speedValue = 255; // default speed
+    }
+  }
 }
 
 // === SETUP ===
@@ -179,24 +198,36 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_RL_A), readEncoderRL, RISING);
   attachInterrupt(digitalPinToInterrupt(ENC_RR_A), readEncoderRR, RISING);
 
-  stopAll();
+  stopMotors();
 }
 
 // === LOOP ===
 void loop() {
   // Handle serial commands instantly
   if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
+    String input = Serial.readStringUntil('>');
+    // input = "<" + input + ">"; // re-add '>' removed by readStringUntil
+    input = input + ">"; // re-add '>' removed by readStringUntil
+    parseCommand(input);
+    Serial.println(input);
 
-    if (cmd == "<FORWARD>") moveForward();
-    else if (cmd == "<BACKWARD>") moveBackward();
-    else if (cmd == "<LEFT>") moveLeft();
-    else if (cmd == "<RIGHT>") moveRight();
-    else if (cmd == "<TURN_LEFT>") turnLeft();
-    else if (cmd == "<TURN_RIGHT>") turnRight();
-    else if (cmd == "<STOP>") stopAll();
-
+    if (command == "FORWARD") {
+      moveForward(speedValue);
+      Serial.print("moving forward");
+    } else if (command == "BACKWARD") {
+      moveBackward(speedValue);
+      Serial.print("moving backward");
+    } else if (command == "TURNLEFT") {
+      turnLeft(speedValue);
+    } else if (command == "TURNRIGHT") {
+      turnRight(speedValue);
+    } else if (command == "MOVELEFT") {
+      moveLeft(speedValue);
+    } else if (command == "MOVERIGHT") {
+      moveRight(speedValue);
+    } else if (command == "STOP") {
+      stopMotors();
+    }
   }
 
   // Send encoder data every 100 ms without delay()
