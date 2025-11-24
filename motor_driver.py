@@ -9,7 +9,7 @@ from rclpy.duration import Duration
 class MotorDriverNode(Node):
     def __init__(self):
         super().__init__('motor_driver_node')
-        self.get_logger().info("⚙️ Motor Driver Node started (STOP only on arrival)")
+        self.get_logger().info("⚙️ Motor Driver Node started (rotation disabled)")
 
         # --- Serial connection ---
         self.port = '/dev/ttyUSB0'
@@ -33,7 +33,6 @@ class MotorDriverNode(Node):
 
         # Speed limits (m/s)
         self.max_linear_speed = 0.10
-        self.max_angular_speed = 0.05
 
         # Watchdog (log-only)
         self.last_command_time = self.get_clock().now()
@@ -46,40 +45,36 @@ class MotorDriverNode(Node):
     def cmd_vel_callback(self, msg: Twist):
         linear_x = msg.linear.x
         linear_y = msg.linear.y
-        angular_z = msg.angular.z
+        # ignore angular_z while rotation disabled
 
         command = "<STOP:0>"
 
-        # Normalize
+        # Normalize using dominant axis magnitude
         lin_mag = max(abs(linear_x), abs(linear_y))
         lin_norm = min(1.0, lin_mag / max(self.max_linear_speed, 1e-6))
-        ang_norm = min(1.0, abs(angular_z) / max(self.max_angular_speed, 1e-6))
 
         linear_speed = int(lin_norm * 255)
-        angular_speed = int(ang_norm * 255)
 
         # --- DEADZONE COMPENSATION ---
-        MIN_PWM = 120
+        MIN_PWM = 180
+        MOTION_DEADZONE = 0.005
 
         if linear_speed > 0:
             linear_speed = max(MIN_PWM, linear_speed)
 
-        if angular_speed > 0:
-            angular_speed = max(MIN_PWM, angular_speed)
-            angular_speed = min(150, angular_speed)  # safe limit
-
-        # Motion mode selection
-        if abs(angular_z) > 0.1:
-            command = f"<TURNLEFT:{angular_speed}>" if angular_z > 0 else f"<TURNRIGHT:{angular_speed}>"
-        elif abs(linear_x) > 0.01:
-            command = f"<FORWARD:{linear_speed}>" if linear_x > 0 else f"<BACKWARD:{linear_speed}>"
-        elif abs(linear_y) > 0.01:
-            command = f"<MOVERIGHT:{linear_speed}>" if linear_y > 0 else f"<MOVELEFT:{linear_speed}>"
-        else:
+        # Choose dominant axis to send single-direction commands
+        if lin_mag < MOTION_DEADZONE:
             command = "<STOP:0>"
+        else:
+            if abs(linear_x) >= abs(linear_y):
+                command = f"<FORWARD:{linear_speed}>" if linear_x > 0 else f"<BACKWARD:{linear_speed}>"
+            else:
+                command = f"<MOVERIGHT:{linear_speed}>" if linear_y > 0 else f"<MOVELEFT:{linear_speed}>"
 
         # Avoid STOP spam
         if command == "<STOP:0>" and self.last_command == "<STOP:0>":
+            # don't resend STOP, but refresh last_command_time so watchdog knows we're still receiving /cmd_vel
+            self.last_command_time = self.get_clock().now()
             return
 
         # Send only when changed
