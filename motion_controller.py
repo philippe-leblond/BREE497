@@ -18,9 +18,9 @@ class MotionControllerNode(Node):
 
         # === Waypoints for autonomous run ===
         self.waypoints = [
-            (0.2, 0.0), # in meters
+            (0.0, 0.2), # in meters
             (0.2, 0.2),
-            (0.0, 0.2),
+            (0.2, 0.0),
             (0.0, 0.0),
         ]
         self.current_goal_index = 0
@@ -32,10 +32,18 @@ class MotionControllerNode(Node):
         self.last_reached_index = -1
 
         # === Control parameters ===
-        self.kp_linear = 0.1
-        self.kp_angular = 0.3
-        self.xy_tolerance = 0.05
+        self.kp_linear = 0.12
+        self.kp_angular = 0.0   # keep zero while turning disabled
+        # tighter waypoint tolerance (meters) and confirmation count
+        self.xy_tolerance = 0.03
+        self.arrival_required = 2   # require 4 consecutive control ticks (~0.2s at 20Hz)
+        self._arrival_count = 0
         self.yaw_tolerance = math.radians(5)
+        # minimum commanded travel speed to overcome motor deadzone (m/s)
+        self.min_travel_speed = 0.02
+        # on arrival, publish STOP for a few cycles so motor driver sees it
+        self.post_arrival_stop_cycles = 4
+        self._stop_cycles = 0
 
         # === Subscribers ===
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
@@ -59,6 +67,13 @@ class MotionControllerNode(Node):
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         self.theta = math.atan2(siny_cosp, cosy_cosp)
+
+        # DEBUG: show raw odom values (precise numbers and frame ids)
+        self.get_logger().debug(
+            f"odom header.frame_id='{msg.header.frame_id}' child_frame_id='{msg.child_frame_id}' "
+            f"pos=({self.x:.6f}, {self.y:.6f}, {msg.pose.pose.position.z:.6f}) "
+            f"yaw={math.degrees(self.theta):.3f}° cov[0]={msg.pose.covariance[0]:.6g}"
+        )
 
     def goal_callback(self, msg: PoseStamped):
         self.goal_x = msg.pose.position.x
@@ -88,6 +103,12 @@ class MotionControllerNode(Node):
     # CONTROL LOOP
     # ====================
     def control_loop(self):
+        # if we are in forced stop cycles (after arrival), keep publishing STOP
+        if self._stop_cycles > 0:
+            self.publish_stop()
+            self._stop_cycles -= 1
+            return
+
         # Select target
         if self.new_goal_received:
             target_x = self.goal_x
@@ -103,38 +124,60 @@ class MotionControllerNode(Node):
         dy = target_y - self.y
         distance = math.hypot(dx, dy)
 
-        if distance < self.xy_tolerance:
-            self.publish_stop()
+        # Per-axis deadband: if one axis is already within tolerance, zero it so we don't
+        # generate small residual commands on that axis due to heading offsets.
+        if abs(dx) <= self.xy_tolerance:
+            dx = 0.0
+        if abs(dy) <= self.xy_tolerance:
+            dy = 0.0
 
+        # Debounce arrival: require several consecutive ticks inside tolerance
+        if distance <= self.xy_tolerance:
+            self._arrival_count += 1
+        else:
+            self._arrival_count = 0
+
+        if self._arrival_count >= self.arrival_required:
+            # confirmed arrival
+            self.get_logger().info(f"✅ Waypoint reached ({target_x:.2f}, {target_y:.2f}) after {self._arrival_count} checks")
+            self.publish_stop()
+            self._arrival_count = 0
+            # force a few STOP publishes so motor driver receives them
+            self._stop_cycles = self.post_arrival_stop_cycles
             if not self.new_goal_received:
                 self.current_goal_index += 1
             return
 
-        # ====== MECANUM CONTROL ======
+        # ====== MECANUM CONTROL (NO ROTATION) ======
         cmd = Twist()
 
-        # --- 1) ROTATE ONLY TO ALIGN TO 0° ---
-        if abs(self.theta) > self.yaw_tolerance:
-            cmd.angular.z = -self.kp_angular * self.theta
-        else:
-            cmd.angular.z = 0.0
+        # do not issue rotation commands while tuning base travel
+        cmd.angular.z = 0.0
 
-        # --- 2) Convert error into robot frame (for x/y control) ---
+        # --- Convert error into robot frame (for x/y control) ---
         ex = math.cos(-self.theta) * dx - math.sin(-self.theta) * dy
         ey = math.sin(-self.theta) * dx + math.cos(-self.theta) * dy
 
-        # --- 3) Drive toward target in robot frame ---
+        # --- Drive toward target in robot frame ---
+        if abs(dx) <= self.xy_tolerance:
+            ey = self.kp_linear * dy  # Only move in y if x is within tolerance
+            ex = 0.0  # Zero out x error
+
         cmd.linear.x = self.kp_linear * ex
         cmd.linear.y = self.kp_linear * ey
 
         # Limit speeds
         cmd.linear.x = max(min(cmd.linear.x, 0.2), -0.2)
         cmd.linear.y = max(min(cmd.linear.y, 0.2), -0.2)
-        cmd.angular.z = max(min(cmd.angular.z, 0.4), -0.4)
+
+        # enforce a minimum commanded travel magnitude so motor driver doesn't treat as deadzone
+        mag_cmd = max(abs(cmd.linear.x), abs(cmd.linear.y))
+        if mag_cmd > 0.0 and mag_cmd < self.min_travel_speed:
+            scale = self.min_travel_speed / mag_cmd
+            cmd.linear.x *= scale
+            cmd.linear.y *= scale
 
         self.cmd_pub.publish(cmd)
-
-
 
     def publish_stop(self):
         cmd = Twist()
