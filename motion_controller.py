@@ -98,50 +98,42 @@ class MotionControllerNode(Node):
                 return
             target_x, target_y = self.waypoints[self.current_goal_index]
 
-        # Compute errors
+        # Errors in world frame
         dx = target_x - self.x
         dy = target_y - self.y
         distance = math.hypot(dx, dy)
-        angle_to_goal = math.atan2(dy, dx)
-        angle_error = self.angle_diff(angle_to_goal, self.theta)
 
-        # Check if goal reached
         if distance < self.xy_tolerance:
             self.publish_stop()
 
             if not self.new_goal_received:
-                if self.current_goal_index != self.last_reached_index:
-                    self.get_logger().info(
-                        f"🎉 Reached waypoint {self.current_goal_index+1}! Moving to next one..."
-                    )
-                    self.last_reached_index = self.current_goal_index
-
                 self.current_goal_index += 1
-
             return
 
-        # === Proportional controller with two phases ===
+        # ====== MECANUM CONTROL ======
         cmd = Twist()
 
-        # 1) Big heading error -> rotate in place
-        angle_threshold = math.radians(10)  # ~10 degrees
-
-        if abs(angle_error) > angle_threshold:
-            cmd.angular.z = self.kp_angular * angle_error
-            cmd.linear.x = 0.0
-            cmd.linear.y = 0.0
-
+        # --- 1) ROTATE ONLY TO ALIGN TO 0° ---
+        if abs(self.theta) > self.yaw_tolerance:
+            cmd.angular.z = -self.kp_angular * self.theta
         else:
-            # 2) Heading is good enough -> drive mostly forward
-            cmd.angular.z = self.kp_angular * angle_error   # small corrections
-            cmd.linear.x = self.kp_linear * distance       # forward
-            cmd.linear.y = 0.0                             # no lateral for now
+            cmd.angular.z = 0.0
+
+        # --- 2) Convert error into robot frame (for x/y control) ---
+        ex = math.cos(-self.theta) * dx - math.sin(-self.theta) * dy
+        ey = math.sin(-self.theta) * dx + math.cos(-self.theta) * dy
+
+        # --- 3) Drive toward target in robot frame ---
+        cmd.linear.x = self.kp_linear * ex
+        cmd.linear.y = self.kp_linear * ey
 
         # Limit speeds
-        cmd.linear.x = max(min(cmd.linear.x, 0.2), -0.2)   # slower forward
-        cmd.angular.z = max(min(cmd.angular.z, 0.4), -0.4) # slower turning
+        cmd.linear.x = max(min(cmd.linear.x, 0.2), -0.2)
+        cmd.linear.y = max(min(cmd.linear.y, 0.2), -0.2)
+        cmd.angular.z = max(min(cmd.angular.z, 0.4), -0.4)
 
         self.cmd_pub.publish(cmd)
+
 
 
     def publish_stop(self):
