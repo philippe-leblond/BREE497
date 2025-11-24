@@ -62,7 +62,7 @@ void IRAM_ATTR readEncoderFL() {
 
 void IRAM_ATTR readEncoderFR() {
   int b = digitalRead(ENC_FR_B);
-  encoderFR += (b > 0) ? 1 : -1;
+  encoderFR += (b > 0) ? 1 : -1; 
 }
 
 void IRAM_ATTR readEncoderRL() {
@@ -72,7 +72,7 @@ void IRAM_ATTR readEncoderRL() {
 
 void IRAM_ATTR readEncoderRR() {
   int b = digitalRead(ENC_RR_B);
-  encoderRR += (b > 0) ? 1 : -1;
+  encoderRR += (b > 0) ? 1 : -1; 
 }
 
 // === MOTOR CONTROL ===
@@ -107,21 +107,44 @@ void moveBackward(int speedValue) {
   Serial.print("Backward: "); Serial.println(speedValue);
 }
 
+// === MOVEMENT FUNCTIONS ===
+
+// STRAFE RIGHT = [+,-,-,+]
+void moveLeft(int speedValue) {
+  // FL forward (+)
+  setMotor(IN1_FL, IN2_FL, EN_FL, true, speedValue);
+
+  // FR backward (-)
+  setMotor(IN1_FR, IN2_FR, EN_FR, false, speedValue);
+
+  // RL backward (-) → but your hardware produces forward, so invert logic
+  setMotor(IN1_RL, IN2_RL, EN_RL, false, speedValue); 
+
+  // RR forward (+) → but your hardware produces backward, so invert logic
+  setMotor(IN1_RR, IN2_RR, EN_RR, true, speedValue); 
+
+  Serial.print("Right: "); Serial.println(speedValue);
+}
+
+
+// STRAFE LEFT = opposite of right = [-,+,+,-]
 void moveRight(int speedValue) {
+  // FL backward (-)
   setMotor(IN1_FL, IN2_FL, EN_FL, false, speedValue);
+
+  // FR forward (+)
   setMotor(IN1_FR, IN2_FR, EN_FR, true, speedValue);
+
+  // RL forward (+) → inverted
   setMotor(IN1_RL, IN2_RL, EN_RL, true, speedValue);
+
+  // RR backward (-) → inverted
   setMotor(IN1_RR, IN2_RR, EN_RR, false, speedValue);
+
   Serial.print("Left: "); Serial.println(speedValue);
 }
 
-void moveLeft(int speedValue) {
-  setMotor(IN1_FL, IN2_FL, EN_FL, true, speedValue);
-  setMotor(IN1_FR, IN2_FR, EN_FR, false, speedValue);
-  setMotor(IN1_RL, IN2_RL, EN_RL, false, speedValue);
-  setMotor(IN1_RR, IN2_RR, EN_RR, true, speedValue);
-  Serial.print("Right: "); Serial.println(speedValue);
-}
+
 
 void turnLeft(int speedValue) {
   setMotor(IN1_FL, IN2_FL, EN_FL, false, speedValue);
