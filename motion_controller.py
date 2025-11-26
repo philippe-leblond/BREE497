@@ -18,9 +18,9 @@ class MotionControllerNode(Node):
 
         # === Waypoints for autonomous run ===
         self.waypoints = [
-            (0.0, 0.2), # in meters
-            (0.2, 0.2),
-            (0.2, 0.0),
+            (0.0, 0.1), # in meters
+            (0.1, 0.1),
+            (0.1, 0.0),
             (0.0, 0.0),
         ]
         self.current_goal_index = 0
@@ -36,7 +36,7 @@ class MotionControllerNode(Node):
         self.kp_angular = 0.0   # keep zero while turning disabled
         # tighter waypoint tolerance (meters) and confirmation count
         self.xy_tolerance = 0.03
-        self.arrival_required = 2   # require 4 consecutive control ticks (~0.2s at 20Hz)
+        self.arrival_required = 1   # require 4 consecutive control ticks (~0.2s at 20Hz)
         self._arrival_count = 0
         self.yaw_tolerance = math.radians(5)
         # minimum commanded travel speed to overcome motor deadzone (m/s)
@@ -98,90 +98,100 @@ class MotionControllerNode(Node):
         self.get_logger().info(
             f"📍 Pos=({self.x:.2f}, {self.y:.2f}) θ={math.degrees(self.theta):.1f}° | {goal_info}"
         )
+    def publish_stop(self):
+        """Send a STOP command to the motor driver."""
+        stop = Twist()
+        stop.linear.x = 0.0
+        stop.linear.y = 0.0
+        stop.angular.z = 0.0
+        self.cmd_pub.publish(stop)
+        self.get_logger().info("🛑 Published STOP Twist")
 
     # ====================
     # CONTROL LOOP
     # ====================
     def control_loop(self):
-        # if we are in forced stop cycles (after arrival), keep publishing STOP
-        if self._stop_cycles > 0:
-            self.publish_stop()
-            self._stop_cycles -= 1
-            return
-
-        # Select target
+        # ========= SELECT TARGET =========
         if self.new_goal_received:
+            # manual goal mode
             target_x = self.goal_x
             target_y = self.goal_y
+
         else:
+            # autonomous waypoint mode
             if self.current_goal_index >= len(self.waypoints):
+                # === All waypoints completed ===
+                self.get_logger().info("🎉 All waypoints complete — sending STOP")
                 self.publish_stop()
                 return
+
+            # safe to index the waypoint
             target_x, target_y = self.waypoints[self.current_goal_index]
 
-        # Errors in world frame
+
+        # ========= POSITION ERROR (WORLD FRAME) =========
         dx = target_x - self.x
         dy = target_y - self.y
         distance = math.hypot(dx, dy)
 
-        # Per-axis deadband: if one axis is already within tolerance, zero it so we don't
-        # generate small residual commands on that axis due to heading offsets.
-        if abs(dx) <= self.xy_tolerance:
-            dx = 0.0
-        if abs(dy) <= self.xy_tolerance:
-            dy = 0.0
-
-        # Debounce arrival: require several consecutive ticks inside tolerance
+        # ---- ARRIVAL DEBOUNCE ----
         if distance <= self.xy_tolerance:
             self._arrival_count += 1
         else:
             self._arrival_count = 0
 
+        # ========= ADVANCE TO NEXT WAYPOINT (NO STOPPING) =========
         if self._arrival_count >= self.arrival_required:
-            # confirmed arrival
-            self.get_logger().info(f"✅ Waypoint reached ({target_x:.2f}, {target_y:.2f}) after {self._arrival_count} checks")
-            self.publish_stop()
+            self.get_logger().info(
+                f"➡️ Advancing: reached waypoint {self.current_goal_index+1} "
+                f"({target_x:.2f}, {target_y:.2f})"
+            )
             self._arrival_count = 0
-            # force a few STOP publishes so motor driver receives them
-            self._stop_cycles = self.post_arrival_stop_cycles
+
             if not self.new_goal_received:
                 self.current_goal_index += 1
-            return
 
-        # ====== MECANUM CONTROL (NO ROTATION) ======
-        cmd = Twist()
+            return  # Immediately compute next waypoint on next loop tick
 
-        # do not issue rotation commands while tuning base travel
-        cmd.angular.z = 0.0
-
-        # --- Convert error into robot frame (for x/y control) ---
+        # ========= ROBOT-FRAME ERROR =========
         ex = math.cos(-self.theta) * dx - math.sin(-self.theta) * dy
         ey = math.sin(-self.theta) * dx + math.cos(-self.theta) * dy
 
-        # --- Drive toward target in robot frame ---
-        if abs(dx) <= self.xy_tolerance:
-            ey = self.kp_linear * dy  # Only move in y if x is within tolerance
-            ex = 0.0  # Zero out x error
+        # ========= SIMPLE P CONTROL =========
+        vx_cmd = self.kp_linear * ex
+        vy_cmd = self.kp_linear * ey
 
-        cmd.linear.x = self.kp_linear * ex
-        cmd.linear.y = self.kp_linear * ey
+        # ========= LIMIT SPEEDS =========
+        vx_cmd = max(min(vx_cmd, 0.2), -0.2)
+        vy_cmd = max(min(vy_cmd, 0.2), -0.2)
 
-        # Limit speeds
-        cmd.linear.x = max(min(cmd.linear.x, 0.2), -0.2)
-        cmd.linear.y = max(min(cmd.linear.y, 0.2), -0.2)
-
-        # enforce a minimum commanded travel magnitude so motor driver doesn't treat as deadzone
-        mag_cmd = max(abs(cmd.linear.x), abs(cmd.linear.y))
+        # ========= DEADZONE COMPENSATION =========
+        mag_cmd = max(abs(vx_cmd), abs(vy_cmd))
         if mag_cmd > 0.0 and mag_cmd < self.min_travel_speed:
             scale = self.min_travel_speed / mag_cmd
-            cmd.linear.x *= scale
-            cmd.linear.y *= scale
+            vx_cmd *= scale
+            vy_cmd *= scale
 
-        self.cmd_pub.publish(cmd)
-
-    def publish_stop(self):
+        # ========= SEND CMD_VEL =========
         cmd = Twist()
+        cmd.angular.z = 0.0
+        cmd.linear.x = vx_cmd
+        cmd.linear.y = vy_cmd
         self.cmd_pub.publish(cmd)
+
+        # ========= DEBUG =========
+        # self.get_logger().info(
+        #    f"[CTRL] wp_idx={self.current_goal_index} "
+        #    f"target=({target_x:.3f},{target_y:.3f}) "
+        #    f"pos=({self.x:.3f},{self.y:.3f}) "
+        #    f"dx={dx:.3f} dy={dy:.3f} dist={distance:.3f} "
+        #    f"ex={ex:.3f} ey={ey:.3f} "
+        #    f"cmd_x={vx_cmd:.3f} cmd_y={vy_cmd:.3f} "
+        #    f"arr_cnt={self._arrival_count}"
+        #)
+    
+
+
 
     # ====================
     # UTILITY
