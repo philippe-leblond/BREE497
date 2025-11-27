@@ -44,7 +44,8 @@ class MecanumOdometry(Node):
 
         # === State variables ===
         self.last_encoder = None
-        self.last_time = time.time()
+        self.last_enc_time = time.time()
+        self.last_imu_time = time.time()
 
         self.x = 0.0
         self.y = 0.0
@@ -53,23 +54,58 @@ class MecanumOdometry(Node):
         # IMU yaw rate (rad/s)
         self.imu_yaw_rate = 0.0
 
+        # IMU yaw correction factor (tune this)
+        self.yaw_rate_scale = 1.35 # adjust as needed
+        self.filtered_yaw_rate = 0.0
+        self.gyro_alpha = 0.8
+
+
+
         # Debug limiter
         self.last_debug = 0.0
 
-    # =========================================================
-    # IMU CALLBACK
-    # =========================================================
+  # ==================================================================
+    # IMU CALLBACK — always integrates yaw, even when encoders stall
+    # ==================================================================
     def imu_callback(self, msg: Imu):
-        # we’ll integrate this for theta
-        self.imu_yaw_rate = msg.angular_velocity.z
+        now = time.time()
+        dt = now - self.last_imu_time
+        self.last_imu_time = now
+
+        if dt <= 0:
+            return
+
+        raw = msg.angular_velocity.z
+
+        # Aggressive low-pass so slow updates don't kill motion
+        self.filtered_yaw_rate = (
+            self.gyro_alpha * raw +
+            (1 - self.gyro_alpha) * self.filtered_yaw_rate
+        )
+
+        # Always use IMU yaw, no thresholding
+        self.imu_yaw_rate = self.filtered_yaw_rate
+
+        # ===== INTEGRATE IMU YAW EVEN IF ENCODERS ARE NOT MOVING =====
+        dtheta = self.imu_yaw_rate * self.yaw_rate_scale * dt
+
+        self.theta = math.atan2(
+            math.sin(self.theta + dtheta),
+            math.cos(self.theta + dtheta)
+        )
+
+        # Publish odometry (only rotation here — no dx/dy)
+        self.publish_odom(0.0, 0.0, dtheta / dt if dt > 0 else 0.0)
+
+
 
     # =========================================================
     # ENCODER CALLBACK
     # =========================================================
     def enc_callback(self, msg: Int32MultiArray):
         now = time.time()
-        dt = now - self.last_time
-        self.last_time = now
+        dt = now - self.last_enc_time
+        self.last_enc_time = now
 
         if dt <= 0:
             return
@@ -102,9 +138,25 @@ class MecanumOdometry(Node):
         s_fl, s_fr, s_rl, s_rr = raw
 
         # Reject crazy spikes
+       # if any(abs(r) > 0.5 for r in raw):
+        #    self.get_logger().warning(f"⚠ Spike filtered: {raw}")
+         #   return
+        # If encoder spike detected → ignore wheel odom BUT still integrate IMU yaw
+       ### NEW part 
         if any(abs(r) > 0.5 for r in raw):
-            self.get_logger().warning(f"⚠ Spike filtered: {raw}")
+            self.get_logger().warning(f"⚠ Encoder spike detected — wheels ignored but IMU applied")
+
+            # Still integrate IMU rotation
+            dtheta = self.imu_yaw_rate * self.yaw_rate_scale * dt
+            self.theta = math.atan2(
+                math.sin(self.theta + dtheta),
+                math.cos(self.theta + dtheta)
+            )
+
+            # Publish odom (rotation only)
+            self.publish_odom(0.0, 0.0, dtheta / dt)
             return
+
 
         # === MECANUM KINEMATICS CUSTOMIZED TO YOUR PATTERNS ===
         # Your real encoder patterns:
@@ -124,8 +176,16 @@ class MecanumOdometry(Node):
         dx_body = (s_fl + s_fr + s_rl + s_rr) / 4.0
         dy_body = self.strafe_scale * (-s_fl + s_fr - s_rl + s_rr) / 4.0
 
+       # If the robot is sending a TURNLEFT/TURNRIGHT (burst), accept all IMU motion
+        ## FILTER REMOVED
+        #if abs(self.imu_yaw_rate) < 0.003 and abs(dx_body) < 0.0005 and abs(dy_body) < 0.0005:
+        #    # stationary + tiny noise → ignore
+        #    imu_rate = 0.0
+        #else:
+        imu_rate = self.imu_yaw_rate
+
         # Use IMU for rotation (more reliable than encoders with your wiring)
-        dtheta = self.imu_yaw_rate * dt
+        dtheta = imu_rate * self.yaw_rate_scale * dt
 
         # === Transform to world frame ===
         theta_mid = self.theta + dtheta * 0.5
