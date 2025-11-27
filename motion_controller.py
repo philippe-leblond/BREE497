@@ -15,6 +15,7 @@ class MotionControllerNode(Node):
         self.x = 0.0
         self.y = 0.0
         self.theta = 0.0  # yaw
+        self.initial_heading = None
 
         # === Waypoints for autonomous run ===
         self.waypoints = [
@@ -33,17 +34,20 @@ class MotionControllerNode(Node):
 
         # === Control parameters ===
         self.kp_linear = 0.12
-        self.kp_angular = 0.0   # keep zero while turning disabled
+        self.kp_angular = 0.07   # keep zero while turning disabled
         # tighter waypoint tolerance (meters) and confirmation count
         self.xy_tolerance = 0.03
-        self.arrival_required = 1   # require 4 consecutive control ticks (~0.2s at 20Hz)
+        self.arrival_required = 2   # require 4 consecutive control ticks (~0.2s at 20Hz)
         self._arrival_count = 0
-        self.yaw_tolerance = math.radians(5)
+        self.yaw_drift_threshold = math.radians(8)
         # minimum commanded travel speed to overcome motor deadzone (m/s)
         self.min_travel_speed = 0.02
+        self.max_turn_speed = 0.4  # rad/s
         # on arrival, publish STOP for a few cycles so motor driver sees it
         self.post_arrival_stop_cycles = 4
         self._stop_cycles = 0
+
+        
 
         # === Subscribers ===
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
@@ -53,8 +57,8 @@ class MotionControllerNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # === Timers ===
-        self.create_timer(0.05, self.control_loop)  # 20 Hz control
-        self.create_timer(1.0, self.debug_loop)      # 1 Hz debug
+        self.create_timer(1.00, self.control_loop)  # 5 Hz control
+        self.create_timer(1.00, self.debug_loop)    # 5 Hz debug
 
     # ====================
     # CALLBACKS
@@ -74,6 +78,11 @@ class MotionControllerNode(Node):
             f"pos=({self.x:.6f}, {self.y:.6f}, {msg.pose.pose.position.z:.6f}) "
             f"yaw={math.degrees(self.theta):.3f}° cov[0]={msg.pose.covariance[0]:.6g}"
         )
+
+        if self.initial_heading is None:
+            self.initial_heading = self.theta
+            self.get_logger().info(f"🎯 Initial heading locked at {math.degrees(self.theta):.2f}°")
+
 
     def goal_callback(self, msg: PoseStamped):
         self.goal_x = msg.pose.position.x
@@ -111,6 +120,11 @@ class MotionControllerNode(Node):
     # CONTROL LOOP
     # ====================
     def control_loop(self):
+
+        # Wait until odom callback initializes heading
+        if self.initial_heading is None:
+            return
+
         # ========= SELECT TARGET =========
         if self.new_goal_received:
             # manual goal mode
@@ -172,9 +186,20 @@ class MotionControllerNode(Node):
             vx_cmd *= scale
             vy_cmd *= scale
 
+         # ===========================================
+        #  YAW HOLD MODE (ONLY CORRECTS DRIFT)
+        # ===========================================
+        yaw_error = self.angle_diff(self.initial_heading, self.theta)
+
+        if abs(yaw_error) < self.yaw_drift_threshold:
+            ang_cmd = 0.0
+        else:
+            ang_cmd = self.kp_angular * yaw_error
+            ang_cmd = max(min(ang_cmd, self.max_turn_speed), -self.max_turn_speed)
+
         # ========= SEND CMD_VEL =========
         cmd = Twist()
-        cmd.angular.z = 0.0
+        cmd.angular.z = ang_cmd
         cmd.linear.x = vx_cmd
         cmd.linear.y = vy_cmd
         self.cmd_pub.publish(cmd)
